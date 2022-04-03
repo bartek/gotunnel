@@ -1,11 +1,10 @@
 package tunnel
 
-// REVIEW: https://ixday.github.io/post/golang_ssh_tunneling/
-
 import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -16,14 +15,29 @@ type Endpoint struct {
 	User    string
 }
 
+// String implements Stringer
 func (e Endpoint) String() string {
-	return e.Address
+	builder := strings.Builder{}
+	builder.WriteString(e.User)
+	if e.User != "" {
+		builder.WriteString("@")
+	}
+	builder.WriteString(e.Address)
+	return builder.String()
 }
 
 func NewEndpoint(s string) *Endpoint {
-	// FIXME: Find @ to check for user and split.
+	// Check for @ to identify username.
+	idx := strings.Index(s, "@")
+	var user string
+	if idx > -1 {
+		user = s[:idx]
+		s = s[idx+1:]
+	}
+
 	return &Endpoint{
 		Address: s,
+		User:    user,
 	}
 }
 
@@ -45,53 +59,43 @@ type SSHTunnel struct {
 	close  chan struct{}
 }
 
-// awaitConnection awaits a connection to listener via Accept
-// When the connection is made the resulting net.Conn is sent on the channel
-func awaitConnection(listener net.Listener, c chan net.Conn) {
-	conn, err := listener.Accept()
+func copyConn(writer, reader net.Conn) {
+	_, err := io.Copy(writer, reader)
 	if err != nil {
-		fmt.Println("Accepting error: ", err)
-		return
+		fmt.Printf("tunnel copy error: %s", err)
 	}
-	c <- conn
 }
 
 func (s *SSHTunnel) Start() error {
-	listener, err := net.Listen("tcp", s.Local.String())
+	listener, err := net.Listen("tcp", s.Local.Address)
 	if err != nil {
 		return err
 	}
 
-	c := make(chan net.Conn)
-
 	for !s.closed {
-		go awaitConnection(listener, c)
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
 
 		select {
 		case <-s.close:
 			s.closed = true
-		case conn := <-c:
+		default:
 			go func(conn net.Conn) {
 				// Now forward the connection by sshing into the target and assigning the
 				// remote.
-				serverConn, err := ssh.Dial("tcp", s.Target.String(), s.Config)
+				serverConn, err := ssh.Dial("tcp", s.Target.Address, s.Config)
 				if err != nil {
 					return
 				}
 
-				fmt.Println("connected to", s.Target.String())
+				fmt.Println("connected to", s.Target.Address)
 
 				// Dial the remote endpoint using server connection
-				remoteConn, err := serverConn.Dial("tcp", s.Remote.String())
+				remoteConn, err := serverConn.Dial("tcp", s.Remote.Address)
 				if err != nil {
 					return
-				}
-
-				copyConn := func(writer, reader net.Conn) {
-					_, err := io.Copy(writer, reader)
-					if err != nil {
-						fmt.Printf("tunnel copy error: %s", err)
-					}
 				}
 
 				go copyConn(conn, remoteConn)
@@ -110,13 +114,15 @@ func (s *SSHTunnel) Close() {
 }
 
 func New(target string, auth ssh.AuthMethod, local string, destination string) *SSHTunnel {
+	t := NewEndpoint(target)
+
 	return &SSHTunnel{
-		Target: NewEndpoint(target),
+		Target: t,
 		Local:  NewEndpoint(local),
 		Remote: NewEndpoint(destination),
 
 		Config: &ssh.ClientConfig{
-			User: "ubuntu",
+			User: t.User,
 			Auth: []ssh.AuthMethod{auth},
 			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 				// Always accept key. We probably shouldn't do this, but for the
