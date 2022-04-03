@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -46,59 +45,59 @@ type SSHTunnel struct {
 	close  chan struct{}
 }
 
+// awaitConnection awaits a connection to listener via Accept
+// When the connection is made the resulting net.Conn is sent on the channel
 func awaitConnection(listener net.Listener, c chan net.Conn) {
 	conn, err := listener.Accept()
 	if err != nil {
 		fmt.Println("Accepting error: ", err)
 		return
 	}
-	fmt.Println("returned conn")
 	c <- conn
 }
 
 func (s *SSHTunnel) Start() error {
-	fmt.Println(s.Local.String())
 	listener, err := net.Listen("tcp", s.Local.String())
 	if err != nil {
 		return err
 	}
 
+	c := make(chan net.Conn)
+
 	for !s.closed {
-		conn, err := listener.Accept()
-		if err != nil {
-			fmt.Println("Accepting error: ", err)
-		}
+		go awaitConnection(listener, c)
 
-		go func(conn net.Conn) {
-			// Now forward the connection by sshing into the target and assigning the
-			// remote.
-			serverConn, err := ssh.Dial("tcp", s.Target.String(), s.Config)
-			if err != nil {
-				return
-			}
-
-			fmt.Println("connected to", s.Target.String())
-
-			// Dial the remote endpoint using server connection
-			remoteConn, err := serverConn.Dial("tcp", s.Remote.String())
-			if err != nil {
-				return
-			}
-
-			copyConn := func(writer, reader net.Conn) {
-				_, err := io.Copy(writer, reader)
+		select {
+		case <-s.close:
+			s.closed = true
+		case conn := <-c:
+			go func(conn net.Conn) {
+				// Now forward the connection by sshing into the target and assigning the
+				// remote.
+				serverConn, err := ssh.Dial("tcp", s.Target.String(), s.Config)
 				if err != nil {
-					fmt.Printf("tunnel copy error: %s", err)
+					return
 				}
-			}
 
-			go copyConn(conn, remoteConn)
-			go copyConn(remoteConn, conn)
-		}(conn)
+				fmt.Println("connected to", s.Target.String())
 
-		<-s.close
-		fmt.Println("closed")
-		s.closed = true
+				// Dial the remote endpoint using server connection
+				remoteConn, err := serverConn.Dial("tcp", s.Remote.String())
+				if err != nil {
+					return
+				}
+
+				copyConn := func(writer, reader net.Conn) {
+					_, err := io.Copy(writer, reader)
+					if err != nil {
+						fmt.Printf("tunnel copy error: %s", err)
+					}
+				}
+
+				go copyConn(conn, remoteConn)
+				go copyConn(remoteConn, conn)
+			}(conn)
+		}
 
 	}
 
@@ -110,31 +109,18 @@ func (s *SSHTunnel) Close() {
 	s.close <- struct{}{}
 }
 
-func PEMFile(path string) ssh.AuthMethod {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-
-	key, err := ssh.ParsePrivateKey(b)
-	if err != nil {
-		return nil
-	}
-
-	return ssh.PublicKeys(key)
-}
-
 func New(target string, auth ssh.AuthMethod, local string, destination string) *SSHTunnel {
-
 	return &SSHTunnel{
 		Target: NewEndpoint(target),
 		Local:  NewEndpoint(local),
 		Remote: NewEndpoint(destination),
 
 		Config: &ssh.ClientConfig{
+			User: "ubuntu",
 			Auth: []ssh.AuthMethod{auth},
 			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-				// Always accept key.
+				// Always accept key. We probably shouldn't do this, but for the
+				// sake of simplicity...
 				return nil
 			},
 		},
