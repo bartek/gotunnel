@@ -22,6 +22,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	c := make(chan bool)
+
 	for _, dt := range config.Tunnels {
 		// Get the identity
 		// FIXME: Sanity check the path somewhere, maybe on yaml decode. Since
@@ -41,10 +43,12 @@ func main() {
 			dt.Local,
 			dt.Remote,
 		)
-		err = t.Start()
-		if err != nil {
-			fmt.Println(err)
-		}
+		go t.Start() // err = ..
+		//if err != nil {
+		//	fmt.Println(err)
+		//}
 	}
+
+	<-c
 
 }
